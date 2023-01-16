@@ -1,0 +1,8 @@
+build/
+dist/
+pyclf.egg-info/
+__pycache__
+_build
+_static
+_templates
+*.pyc

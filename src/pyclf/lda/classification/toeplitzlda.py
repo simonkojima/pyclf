@@ -290,7 +290,7 @@ class ShrinkageLinearDiscriminantAnalysis(
         if self.priors is None:
             # here we deviate from the bbci implementation and
             # use the sample priors by default
-            _, y_t = np.unique(y, return_inverse=True)  # non-negative ints
+            _, y_t = np.unique(y_train, return_inverse=True)  # non-negative ints
             priors = np.bincount(y_t) / float(len(y))
         else:
             priors = self.priors
@@ -309,6 +309,14 @@ class ShrinkageLinearDiscriminantAnalysis(
 
         self.coef_ = w.T
         self.intercept_ = b
+
+    def set_parameters(self, coef, intercept, C_inv, cl_mean, y_train, classes):
+        self.coef_ = coef
+        self.intercept_ = intercept
+        self.C_inv = C_inv
+        self.cl_mean = cl_mean
+        self.y_train = y_train
+        self.classes_ = classes
 
     def decision_function(self, X):
         """

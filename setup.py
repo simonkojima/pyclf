@@ -25,7 +25,7 @@ install_requires=[
 
 setuptools.setup(
     name="pyclf-bci",
-    version="0.0.2",
+    version="0.0.3",
     author="Simon Kojima",
     author_email="simon.kojima@outlook.com",
     description="An implementation of various classifier for bci application.",

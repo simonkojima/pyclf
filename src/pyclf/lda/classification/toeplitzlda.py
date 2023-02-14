@@ -23,8 +23,7 @@ from .covariance import (
     subtract_classwise_means,
 )
 
-if TYPE_CHECKING:
-    from mne import BaseEpochs, concatenate_epochs, epochs
+from mne import BaseEpochs, concatenate_epochs, epochs
 
 class EpochsVectorizer(BaseEstimator, TransformerMixin):
 
@@ -412,7 +411,7 @@ class ShrinkageLinearDiscriminantAnalysis(
 
         self.C_inv = C_inv
         self.cl_mean = cl_mean
-        self.y_train
+        self.y_train = y_train
         self.prior_offset = prior_offset
     
     def apply_adaptation(self):
@@ -521,6 +520,7 @@ class ToeplitzLDA(ShrinkageLinearDiscriminantAnalysis):
     def __init__(
         self,
         n_channels=None,
+        unit_w=False,
         *,
         n_times="infer",
         data_is_channel_prime=True,
@@ -535,6 +535,7 @@ class ToeplitzLDA(ShrinkageLinearDiscriminantAnalysis):
             use_fortran_solver=use_fortran_solver,
             tapering=linear_taper,
             enforce_toeplitz=True,
+            unit_w=unit_w,
         )
 
 

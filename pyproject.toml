@@ -1,3 +1,32 @@
 [build-system]
 requires = ["setuptools>=42"]
 build-backend = "setuptools.build_meta"
+
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyclf"
+description = "An impementation of various classifier for bci purpose."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+dynamic = ["version"]
+
+authors = [
+    { name = "Simon Kojima" },
+]
+
+dependencies = [
+    "numpy",
+    "scipy",
+    "scikit-learn",
+]
+
+[tool.setuptools.dynamic]
+version = { attr = "pyclf.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pyclf*"]

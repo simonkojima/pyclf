@@ -1,12 +1,44 @@
 import numpy as np
-from sklearn.base import BaseEstimator, TransformerMixin, ClassifierMixin
-from sklearn.utils.validation import check_is_fitted, check_X_y, check_array
-from sklearn.covariance import LedoitWolf
 from scipy.special import expit, softmax, log_softmax
 from scipy.linalg import inv, pinv, norm
+from sklearn.base import BaseEstimator, TransformerMixin, ClassifierMixin
+from sklearn.utils.validation import check_is_fitted, check_X_y, check_array
+from sklearn.metrics import accuracy_score
 
 
 def compute_priors(Nk, mode):
+    """
+    Compute class prior probabilities from class sample counts.
+
+    This utility function converts class-wise sample counts into prior
+    probabilities according to the specified strategy. It is intended for use
+    in generative classifiers such as LDA, where class priors influence the
+    bias term of the discriminant function.
+
+    Parameters
+    ----------
+    Nk : ndarray of shape (n_classes,)
+        Number of samples observed for each class.
+
+    mode : {"empirical", "equal"}
+        Strategy used to compute the class priors.
+        - "empirical": priors are proportional to the observed class
+          frequencies.
+        - "equal": all classes are assigned equal prior probability,
+          regardless of their frequencies in the data.
+
+    Returns
+    -------
+    priors : ndarray of shape (n_classes,)
+        Array of prior probabilities for each class. The values sum to 1.
+
+    Notes
+    -----
+    Empirical priors reflect the class distribution in the training data and
+    are appropriate when the dataset is representative of the true class
+    frequencies. Equal priors can be useful when classes are imbalanced but
+    should be treated as equally likely in the model.
+    """
     n_classes = Nk.size
     n_samples = Nk.sum()
 
@@ -21,11 +53,46 @@ def compute_priors(Nk, mode):
 
 
 def ledoit_wolf(X, assume_centered=False):
+    """
+    Estimate the Ledoit–Wolf shrinkage coefficient for a covariance matrix.
+
+    This function computes the optimal shrinkage coefficient that linearly
+    combines the empirical covariance matrix with an isotropic target matrix.
+    The implementation follows the classical Ledoit–Wolf approach using a
+    data-driven estimate of the shrinkage intensity.
+
+    Parameters
+    ----------
+    X : ndarray of shape (n_samples, n_features)
+        Input data matrix. Each row corresponds to a sample and each column to
+        a feature.
+
+    assume_centered : bool, default=False
+        If False, the data are centered by subtracting the column-wise mean
+        before computing the covariance statistics. If True, the data are
+        assumed to be already centered.
+
+    Returns
+    -------
+    shrinkage : float
+        Estimated shrinkage coefficient in the interval [0, 1]. A value close to
+        0 corresponds to little regularization (empirical covariance), while a
+        value close to 1 yields a strongly regularized, near-isotropic
+        covariance matrix.
+
+    Notes
+    -----
+    The returned coefficient can be used to form a regularized covariance
+    matrix as a convex combination of the empirical covariance and a scaled
+    identity matrix. This shrinkage improves numerical stability in
+    high-dimensional or small-sample regimes, which are common in BCI and EEG
+    applications.
+    """
 
     X = X.copy()
 
     if assume_centered is False:
-        X = X - X.mean(axis=0)
+        X = X - X.mean(axis=0, keepdims=True)
 
     n_samples, n_features = X.shape
 
@@ -41,6 +108,8 @@ def ledoit_wolf(X, assume_centered=False):
     phi = phiMat.sum()
 
     gamma = norm(S - F, ord="fro") ** 2
+    if gamma <= 1e-20:
+        return 0.0
     kappa = phi / gamma
 
     shrinkage = np.clip(kappa / n_samples, 0.0, 1.0)
@@ -49,6 +118,38 @@ def ledoit_wolf(X, assume_centered=False):
 
 
 def openvibe_pseudo_inv(X):
+    """
+    Compute a pseudo-inverse using an eigenvalue thresholding strategy inspired by OpenViBE.
+
+    This function computes a symmetric pseudo-inverse of the input matrix by
+    performing an eigenvalue decomposition and inverting only the eigenvalues
+    above a relative threshold. Small eigenvalues are left unchanged, which
+    mimics the behavior used in certain BCI toolchains such as OpenViBE.
+
+    Parameters
+    ----------
+    X : ndarray of shape (n_features, n_features)
+        Symmetric square matrix to be pseudo-inverted. In typical usage, this
+        corresponds to a (regularized) covariance matrix.
+
+    Returns
+    -------
+    X_inv : ndarray of shape (n_features, n_features)
+        Pseudo-inverse matrix obtained by selectively inverting eigenvalues
+        above a tolerance level.
+
+    Notes
+    -----
+    The matrix is symmetrized before decomposition to improve numerical
+    stability. Eigenvalues below a relative threshold (scaled by the largest
+    eigenvalue) are not inverted, which avoids amplification of numerical noise
+    in near-singular covariance matrices.
+
+    This behavior differs from the standard Moore–Penrose pseudo-inverse, where
+    small eigenvalues are typically set to zero. The present approach is
+    intended to reproduce inversion strategies commonly used in practical BCI
+    pipelines.
+    """
 
     X = 0.5 * (X + X.T)
 
@@ -63,12 +164,77 @@ def openvibe_pseudo_inv(X):
 
 
 class BinaryLinearDiscriminantAnalysis(BaseEstimator, ClassifierMixin):
+    """
+    Binary Linear Discriminant Analysis (LDA) classifier with shared covariance.
+
+    This classifier implements the classical two-class LDA under the Gaussian
+    generative model with a shared covariance matrix. The covariance can be
+    optionally regularized using Ledoit–Wolf shrinkage and inverted using either
+    the matrix inverse or pseudo-inverse.
+
+    The implementation is designed to be simple, readable, and consistent with
+    the mathematical formulation of LDA, making it suitable as a reference
+    implementation for educational and research purposes.
+
+    Parameters
+    ----------
+    shrinkage : {"lwf"} or float, default="lwf"
+        Shrinkage strategy for the shared covariance matrix.
+        - "lwf": Ledoit–Wolf shrinkage is estimated from the data.
+        - float: fixed shrinkage coefficient in [0, 1].
+
+    priors : {"empirical", "equal"}, default="empirical"
+        Class prior probabilities.
+        - "empirical": estimated from class frequencies in the training data.
+        - "equal": all classes are assumed to have equal prior probability.
+
+    scaling : float or None, default=2
+        Optional scaling factor applied to the weight vector. This rescales the
+        magnitude of the discriminant direction without changing its orientation.
+        If None, no scaling is applied.
+
+    inverse : {"inv", "pinv"}, default="pinv"
+        Method used to invert the (possibly regularized) covariance matrix.
+        - "inv": standard matrix inverse (requires full-rank covariance).
+        - "pinv": Moore–Penrose pseudo-inverse (robust to rank-deficient cases).
+
+    Attributes
+    ----------
+    classes_ : ndarray of shape (2,)
+        Sorted unique class labels seen during fitting.
+
+    mu_ : ndarray of shape (2, n_features)
+        Estimated class-wise mean vectors.
+
+    priors_ : ndarray of shape (2,)
+        Class prior probabilities used in the model.
+
+    shrinkage_ : float
+        Estimated or specified shrinkage coefficient applied to the covariance.
+
+    w_ : ndarray of shape (n_features,)
+        Weight vector defining the linear discriminant direction.
+
+    b_ : float
+        Bias term of the linear discriminant function.
+
+    Notes
+    -----
+    This implementation assumes exactly two classes. For multi-class problems,
+    use :class:`LinearDiscriminantAnalysis`.
+
+    The model follows a generative approach with a shared covariance matrix
+    estimated from class-centered samples. Shrinkage regularization can improve
+    stability in small-sample or high-dimensional settings, which are common in
+    BCI and EEG applications.
+    """
+
     def __init__(
         self,
         shrinkage="lwf",
         priors="empirical",
         scaling=2,
-        inverse="inv",
+        inverse="pinv",
     ):
         self.shrinkage = shrinkage
         self.priors = priors
@@ -112,22 +278,22 @@ class BinaryLinearDiscriminantAnalysis(BaseEstimator, ClassifierMixin):
                 X=Xc,
                 assume_centered=False,
             )
-            self.gamma_ = shrinkage
+            self.shrinkage_ = shrinkage
         else:
-            self.gamma_ = float(self.gamma)
+            self.shrinkage_ = float(self.shrinkage)
 
-        if self.gamma_ < 0 or self.gamma_ > 1:
+        if self.shrinkage_ < 0 or self.shrinkage_ > 1:
             raise RuntimeError("shrinkage parameter should be in [0, 1].")
 
         nu = np.trace(Sw) / n_features
         T = nu * np.eye(n_features)
 
-        Sw_shrunk = (1 - self.gamma_) * Sw + self.gamma_ * T
+        Sw_shrunk = (1 - self.shrinkage_) * Sw + self.shrinkage_ * T
 
         if self.inverse == "inv":
-            self._inv = np.linalg.inv
+            self._inv = inv
         elif self.inverse == "pinv":
-            self._inv = np.linalg.pinv
+            self._inv = pinv
         else:
             raise RuntimeError("inverse should be either 'inv' or 'pinv'.")
 
@@ -149,7 +315,7 @@ class BinaryLinearDiscriminantAnalysis(BaseEstimator, ClassifierMixin):
         return self
 
     def decision_function(self, X):
-        check_is_fitted(self, ["classes_", "gamma_", "w_", "b_"])
+        check_is_fitted(self, ["classes_", "shrinkage_", "w_", "b_"])
         X = check_array(X)
         return X @ self.w_ + self.b_
 
@@ -173,11 +339,79 @@ class BinaryLinearDiscriminantAnalysis(BaseEstimator, ClassifierMixin):
 
 
 class LinearDiscriminantAnalysis(BaseEstimator, ClassifierMixin):
+    """
+    Multi-class Linear Discriminant Analysis (LDA) classifier with shared covariance.
+
+    This classifier implements the classical multi-class LDA under a Gaussian
+    generative model where all classes share a common covariance matrix. Each
+    class is modeled by a linear discriminant function, and class probabilities
+    are obtained via a softmax transformation of these discriminant scores.
+
+    The implementation emphasizes clarity and direct correspondence with the
+    standard LDA formulation, making it suitable as a reference implementation
+    for educational and research use.
+
+    Parameters
+    ----------
+    shrinkage : {"lwf"} or float, default="lwf"
+       Shrinkage strategy for the shared covariance matrix.
+       - "lwf": Ledoit–Wolf shrinkage estimated from the data.
+       - float: fixed shrinkage coefficient in [0, 1].
+
+    priors : {"empirical", "equal"}, default="empirical"
+       Class prior probabilities.
+       - "empirical": estimated from class frequencies in the training data.
+       - "equal": all classes are assumed to have equal prior probability.
+
+    inverse : {"inv", "pinv", "openvibe"}, default="pinv"
+       Method used to invert the shared covariance matrix.
+       - "inv": standard matrix inverse (requires full-rank covariance).
+       - "pinv": Moore–Penrose pseudo-inverse (robust to rank-deficient cases).
+       - "openvibe": pseudo-inverse with eigenvalue thresholding similar to
+         the OpenViBE implementation.
+
+    covariance : {"within", "global"}, default="within"
+       Strategy used to estimate the shared covariance matrix.
+       - "within": class-wise centering (within-class covariance).
+       - "global": centering using the global mean of all samples.
+
+    Attributes
+    ----------
+    classes_ : ndarray of shape (n_classes,)
+       Sorted unique class labels seen during fitting.
+
+    mu_ : ndarray of shape (n_classes, n_features)
+       Estimated class-wise mean vectors.
+
+    priors_ : ndarray of shape (n_classes,)
+       Class prior probabilities used in the model.
+
+    shrinkage_ : float
+       Estimated or specified shrinkage coefficient applied to the covariance.
+
+    w_ : ndarray of shape (n_classes, n_features)
+       Weight vectors defining the linear discriminant functions for each class.
+
+    b_ : ndarray of shape (n_classes,)
+       Bias terms of the class-specific discriminant functions.
+
+    Notes
+    -----
+    This implementation follows the standard generative multi-class LDA with a
+    shared covariance matrix. The discriminant scores are transformed into class
+    probabilities using a softmax function, ensuring numerically stable
+    probability estimates.
+
+    The option ``covariance="within"`` corresponds to the classical pooled
+    within-class covariance used in LDA, while ``covariance="global"`` uses a
+    globally centered covariance matrix for alternative modeling assumptions.
+    """
+
     def __init__(
         self,
         shrinkage="lwf",
         priors="empirical",
-        inverse="inv",
+        inverse="pinv",
         covariance="within",
     ):
         self.shrinkage = shrinkage
@@ -238,9 +472,9 @@ class LinearDiscriminantAnalysis(BaseEstimator, ClassifierMixin):
         S_shrunk = (1 - self.shrinkage_) * S + self.shrinkage_ * T
 
         if self.inverse == "inv":
-            self._inv = np.linalg.inv
+            self._inv = inv
         elif self.inverse == "pinv":
-            self._inv = np.linalg.pinv
+            self._inv = pinv
         elif self.inverse == "openvibe":
             self._inv = openvibe_pseudo_inv
         else:
@@ -257,7 +491,7 @@ class LinearDiscriminantAnalysis(BaseEstimator, ClassifierMixin):
 
     def decision_function(self, X):
         X = check_array(X)
-        check_is_fitted(self)
+        check_is_fitted(self, ["classes_", "shrinkage_", "w_", "b_"])
         return X @ self.w_.T + self.b_[None, :]
 
     def predict_proba(self, X):

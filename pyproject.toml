@@ -20,6 +20,15 @@ dependencies = [
     "scikit-learn>=1.2",
 ]
 
+[project.optional-dependencies]
+docs = [
+  "sphinx",
+  "sphinx-rtd-theme",
+  "sphinx-gallery",
+  "numpydoc",
+  "myst-parser"
+]
+
 [tool.setuptools.dynamic]
 version = { attr = "pyclf.__version__" }
 

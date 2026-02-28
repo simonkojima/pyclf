@@ -5,6 +5,7 @@ from sklearn.covariance import LedoitWolf
 from scipy.special import expit
 from scipy.linalg import pinv, norm
 
+
 def subtract_classwise_mean(X, y):
     Xc = X.copy()
     for cl in np.unique(y):
@@ -13,124 +14,38 @@ def subtract_classwise_mean(X, y):
     return Xc
 
 
-class ShrinkageLDA(BaseEstimator, ClassifierMixin):
-    """
-    Binary Linear Discriminant Analysis (LDA) with shrinkage covariance estimation.
+def compute_priors(Nk, mode):
+    # priors = np.zeros(Nk.shape)
+    n_classes = Nk.size
+    n_samples = Nk.sum()
+    print(Nk.shape)
+    print(n_classes)
+    print(n_samples)
 
-    This classifier implements a two-class LDA model with a shared covariance matrix
-    estimated using shrinkage regularization. The shrinkage parameter can either be
-    specified manually or estimated automatically using the Ledoit–Wolf method.
+    if mode == "empirical":
+        priors = Nk / n_samples
+    elif mode == "equal":
+        priors = np.full(n_classes, 1.0 / n_classes)
+    else:
+        raise RuntimeError("priors should be either 'empirical' or 'equal'.")
 
-    The model assumes class-conditional Gaussian distributions with class-specific
-    means and a common covariance matrix. The decision function is linear in the
-    feature space, and class probabilities are obtained via a logistic transform of
-    the decision scores.
+    return priors
 
-    Parameters
-    ----------
-    gamma : float or {'lwf'}, default='lwf'
-        Shrinkage coefficient for the pooled covariance matrix.
 
-        - If a float in [0, 1], the covariance is shrunk toward an isotropic
-          target matrix according to:
-          ``Cw = (1 - gamma) * Sigma + gamma * T``,
-          where ``Sigma`` is the pooled within-class covariance and
-          ``T = nu * I`` is the scaled identity matrix.
-        - If 'lwf', the shrinkage coefficient is estimated automatically using
-          the Ledoit–Wolf method.
-
-    priors : {'equal', 'empirical'}, default='equal'
-        Class prior probabilities.
-
-        - 'equal': both classes are assigned prior probability 0.5.
-        - 'empirical': priors are estimated from the class frequencies in `y`.
-
-    scaling : float or None, default=2
-        Optional scaling factor applied to the projection vector `w` so that the
-        projected class means are separated by a specified distance. If None,
-        no additional scaling is applied.
-
-    inverse : {'inv', 'pinv'}, default='inv'
-        Method used to invert the covariance matrix.
-
-        - 'inv': use ``numpy.linalg.inv``.
-        - 'pinv': use ``numpy.linalg.pinv`` (more stable for ill-conditioned
-          covariance matrices).
-
-    Attributes
-    ----------
-    classes_ : ndarray of shape (2,)
-        Unique class labels seen during fitting, sorted in ascending order.
-
-    priors_ : list of float
-        Prior probabilities for the two classes, in the same order as `classes_`.
-
-    gamma_ : float
-        Effective shrinkage coefficient used during fitting. Equals `gamma` if a
-        float is provided, or the value estimated by Ledoit–Wolf when
-        ``gamma='lwf'``.
-
-    w_ : ndarray of shape (n_features,)
-        Linear projection vector defining the discriminant direction.
-
-    b_ : float
-        Bias term of the linear decision function.
-
-    Notes
-    -----
-    The pooled within-class covariance matrix is estimated after subtracting the
-    class-wise mean from each sample:
-
-    .. math::
-
-        \\Sigma = \\frac{1}{N - K} \\sum_{c=1}^{K} \\sum_{i \\in c}
-        (x_i - \\mu_c)(x_i - \\mu_c)^\\top,
-
-    where :math:`N` is the number of samples and :math:`K=2` is the number of
-    classes.
-
-    Shrinkage is then applied toward an isotropic target matrix:
-
-    .. math::
-
-        C_w = (1 - \\gamma)\\,\\Sigma + \\gamma\\,\\nu I,
-
-    with :math:`\\nu = \\mathrm{trace}(\\Sigma) / d` and :math:`d` the number of
-    features.
-
-    The decision function is given by:
-
-    .. math::
-
-        f(x) = w^\\top x + b,
-
-    where :math:`w = C_w^{-1}(\\mu_1 - \\mu_0)`.
-
-    Probabilities are obtained by applying the logistic sigmoid to the decision
-    scores.
-
-    Raises
-    ------
-    RuntimeError
-        If the number of unique classes in `y` is not equal to 2, or if the
-        shrinkage parameter is outside the interval [0, 1].
-
-    References
-    ----------
-    Ledoit, O., & Wolf, M. (2004). A well-conditioned estimator for large-
-    dimensional covariance matrices. Journal of Multivariate Analysis.
-    """
-
+class BinaryLinearDiscriminantAnalysis(BaseEstimator, ClassifierMixin):
     def __init__(
-            self,
-            gamma="lwf",
-            priors="equal",
-            scaling=2,
-            inverse="inv",
+        self,
+        gamma="lwf",
+        priors="empirical",
+        scaling=2,
+        inverse="inv",
+        ddof=1,
     ):
         self.gamma = gamma
         self.priors = priors
         self.scaling = scaling
+        self.inverse = inverse
+        self.ddof = ddof
 
         if inverse == "inv":
             self.inverse = np.linalg.inv
@@ -141,32 +56,41 @@ class ShrinkageLDA(BaseEstimator, ClassifierMixin):
 
     def fit(self, X, y=None):
 
+        n_samples, n_features = X.shape
+
         self.classes_ = np.unique(y)
         if len(self.classes_) != 2:
             raise RuntimeError("Number of classes should be 2.")
 
-        cl = list()
-        for cl_num in self.classes_:
-            I = np.where(y == cl_num)[0]
-            cl.append(X[I, :])
+        self.mu_ = np.zeros((2, n_features))
+        self.w_ = np.zeros(n_features)
+        self.b_ = None
+        self.Nk_ = np.zeros(2, dtype=int)
+        self.priors_ = np.zeros(2)
 
-        mean = list()
-        for cl_data in cl:
-            mean.append(np.mean(cl_data, axis=0))
+        for idx_c, c in enumerate(self.classes_):
+            idx = y == c
+            self.Nk_[idx_c] = int(idx.sum())
+            self.mu_[idx_c, :] = X[idx].mean(axis=0)
 
-        if self.priors == "empirical":
-            n0 = cl[0].shape[0]
-            n1 = cl[1].shape[0]
-            pi0 = n0 / (n0 + n1)
-            pi1 = n1 / (n0 + n1)
-        elif self.priors == "equal":
-            pi0 = pi1 = 0.5
-        else:
-            raise RuntimeError("priors should be either 'empirical' or 'equal'.")
+        self.priors_ = compute_priors(self.Nk_, self.priors)
 
-        self.priors_ = [pi0, pi1]
+        # Xw = subtract_classwise_mean(X=X, y=y)
+        Xc = X.copy()
 
-        Xw = subtract_classwise_mean(X=X, y=y)
+        # compute class-wise covariace
+        for idx_c, c in enumerate(self.classes_):
+            idx = y == c
+            Xc[idx, :] = Xc[idx, :] - self.mu_[idx_c, :]
+
+        print(X.mean(0))
+        print(Xc.mean(0))
+
+        exit()
+
+        Sigma = (Xw.T @ Xw) / (n_samples - self.ddof)
+
+        print()
 
         if self.gamma == "lwf":
             lw = LedoitWolf(assume_centered=False).fit(Xw)
@@ -309,11 +233,11 @@ class ShrinkageLDA_OVA(BaseEstimator, ClassifierMixin):
     """
 
     def __init__(
-            self,
-            gamma="lwf",
-            priors="equal",
-            scaling=2,
-            inverse="inv",
+        self,
+        gamma="lwf",
+        priors="equal",
+        scaling=2,
+        inverse="inv",
     ):
 
         self.gamma = gamma
@@ -408,11 +332,11 @@ def openvibe_ledoit_wolf(X, S):
 
 class OpenVibeLDA(BaseEstimator, ClassifierMixin):
     def __init__(
-            self,
-            shrinkage="openvibe_lwf",
-            priors="empirical",
-            inverse="openvibe",
-            force_diagonal=False,
+        self,
+        shrinkage="openvibe_lwf",
+        priors="empirical",
+        inverse="openvibe",
+        force_diagonal=False,
     ):
         self.shrinkage = shrinkage
         self.priors = priors
@@ -515,11 +439,11 @@ class OpenVibeLDA(BaseEstimator, ClassifierMixin):
 # %%
 class OpenVibeLDA_OVA(BaseEstimator, ClassifierMixin):
     def __init__(
-            self,
-            shrinkage="openvibe_lwf",
-            priors="empirical",
-            inverse="openvibe",
-            force_diagonal=False,
+        self,
+        shrinkage="openvibe_lwf",
+        priors="empirical",
+        inverse="openvibe",
+        force_diagonal=False,
     ):
 
         self.shrinkage = shrinkage

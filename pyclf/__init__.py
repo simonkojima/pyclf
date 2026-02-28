@@ -1,8 +1,8 @@
 __version__ = "0.0.6"
 
-from . import lda
+from . import discriminant_analysis
 
 
 __all__ = [
-    "lda"
+    "discriminant_analysis"
 ]

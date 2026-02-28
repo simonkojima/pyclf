@@ -2,8 +2,8 @@ import numpy as np
 from sklearn.base import BaseEstimator, TransformerMixin, ClassifierMixin
 from sklearn.utils.validation import check_is_fitted, check_X_y, check_array
 from sklearn.covariance import LedoitWolf
-from scipy.special import expit
-from scipy.linalg import pinv, norm
+from scipy.special import expit, softmax, log_softmax
+from scipy.linalg import inv, pinv, norm
 
 
 def compute_priors(Nk, mode):
@@ -48,15 +48,29 @@ def ledoit_wolf(X, assume_centered=False):
     return shrinkage
 
 
+def openvibe_pseudo_inv(X):
+
+    X = 0.5 * (X + X.T)
+
+    eigvals, eigvecs = np.linalg.eigh(X)
+    tol = 1e-5 * eigvals[-1]
+    mod = eigvals.copy()
+    mask = mod >= tol
+    mod[mask] = 1.0 / mod[mask]
+    X_inv = (eigvecs * mod) @ eigvecs.T
+
+    return X_inv
+
+
 class BinaryLinearDiscriminantAnalysis(BaseEstimator, ClassifierMixin):
     def __init__(
         self,
-        gamma="lwf",
+        shrinkage="lwf",
         priors="empirical",
         scaling=2,
         inverse="inv",
     ):
-        self.gamma = gamma
+        self.shrinkage = shrinkage
         self.priors = priors
         self.scaling = scaling
         self.inverse = inverse
@@ -93,7 +107,7 @@ class BinaryLinearDiscriminantAnalysis(BaseEstimator, ClassifierMixin):
 
         Sw = (Xc.T @ Xc) / n_samples
 
-        if self.gamma == "lwf":
+        if self.shrinkage == "lwf":
             shrinkage = ledoit_wolf(
                 X=Xc,
                 assume_centered=False,
@@ -158,95 +172,117 @@ class BinaryLinearDiscriminantAnalysis(BaseEstimator, ClassifierMixin):
         return accuracy_score(y, self.predict(X))
 
 
+class LinearDiscriminantAnalysis(BaseEstimator, ClassifierMixin):
+    def __init__(
+        self,
+        shrinkage="lwf",
+        priors="empirical",
+        inverse="inv",
+        covariance="within",
+    ):
+        self.shrinkage = shrinkage
+        self.priors = priors
+        self.inverse = inverse
+        self.covariance = covariance
+
+    def fit(self, X, y):
+
+        X, y = check_X_y(X, y)
+
+        n_samples, n_features = X.shape
+
+        self.classes_ = np.unique(y)
+        self.mu_ = np.zeros((len(self.classes_), n_features))
+        self.w_ = np.zeros((len(self.classes_), n_features))
+        self.b_ = np.zeros(len(self.classes_))
+        self.Nk_ = np.zeros(len(self.classes_), dtype=int)
+        self.priors_ = np.zeros(len(self.classes_))
+
+        for i, c in enumerate(self.classes_):
+            idx = y == c
+            self.Nk_[i] = int(idx.sum())
+            self.mu_[i, :] = X[idx].mean(axis=0)
+
+        # priors
+        if self.priors == "empirical":
+            self.priors_ = self.Nk_ / n_samples
+        elif self.priors == "equal":
+            self.priors_ = np.full(len(self.classes_), 1.0 / len(self.classes_))
+        else:
+            raise RuntimeError("priors should be either 'empirical' or 'equal'.")
+
+        if self.covariance == "within":
+            Xc = np.zeros_like(X)
+            for idx_c, c in enumerate(self.classes_):
+                idx = y == c
+                Xc[idx, :] = X[idx, :] - self.mu_[idx_c, :]
+        elif self.covariance == "global":
+            Xc = X - X.mean(axis=0, keepdims=True)
+        else:
+            raise RuntimeError("covariance should be either 'within' or 'global'.")
+
+        S = Xc.T @ Xc / n_samples
+
+        if self.shrinkage == "lwf":
+            shrinkage = ledoit_wolf(Xc, assume_centered=False)
+            self.shrinkage_ = shrinkage
+        else:
+            self.shrinkage_ = float(self.shrinkage)
+
+        if self.shrinkage_ < 0 or self.shrinkage_ > 1:
+            raise RuntimeError("shrinkage parameter should be in [0, 1].")
+
+        nu = np.trace(S) / n_features
+        T = nu * np.eye(n_features)
+
+        S_shrunk = (1 - self.shrinkage_) * S + self.shrinkage_ * T
+
+        if self.inverse == "inv":
+            self._inv = np.linalg.inv
+        elif self.inverse == "pinv":
+            self._inv = np.linalg.pinv
+        elif self.inverse == "openvibe":
+            self._inv = openvibe_pseudo_inv
+        else:
+            raise RuntimeError("inverse should be either 'inv', 'pinv', or 'openvibe'")
+
+        S_inv = self._inv(S_shrunk)
+
+        for i, c in enumerate(self.classes_):
+            mu = self.mu_[i, :]
+            self.w_[i, :] = S_inv @ self.mu_[i, :]
+            self.b_[i] = (-0.5 * mu.T @ self.w_[i, :]) + np.log(self.priors_[i])
+
+        return self
+
+    def decision_function(self, X):
+        X = check_array(X)
+        check_is_fitted(self)
+        return X @ self.w_.T + self.b_[None, :]
+
+    def predict_proba(self, X):
+        d = self.decision_function(X)
+
+        p = softmax(d, axis=1)
+
+        return p
+
+    def predict_log_proba(self, X):
+        d = self.decision_function(X)
+        p = log_softmax(d, axis=1)
+        return p
+
+    def predict(self, X):
+        d = self.decision_function(X)
+        I = np.argmax(d, axis=1)
+        preds = self.classes_[I]
+        return preds
+
+    def score(self, X, y):
+        return accuracy_score(y, self.predict(X))
+
+
 class ShrinkageLDA_OVA(BaseEstimator, ClassifierMixin):
-    """
-    One-vs-All (OvA) extension of Shrinkage Linear Discriminant Analysis (LDA).
-
-    This classifier decomposes a multi-class classification problem into a set of
-    binary ShrinkageLDA models, each trained to discriminate one class against
-    all remaining classes. During prediction, decision scores from all binary
-    models are combined, and the class with the highest score is selected.
-
-    Probabilities are obtained by collecting the positive-class probabilities
-    from each binary classifier and normalizing them so that they sum to one
-    across classes. These values should be interpreted as heuristic normalized
-    OvA scores rather than strictly calibrated multi-class posterior
-    probabilities.
-
-    Parameters
-    ----------
-    gamma : float or {'lwf'}, default='lwf'
-        Shrinkage coefficient passed to each underlying :class:`ShrinkageLDA`
-        model. If 'lwf', the Ledoit–Wolf method is used to estimate the optimal
-        shrinkage parameter for each binary problem.
-
-    priors : {'equal', 'empirical'}, default='equal'
-        Class prior strategy used in each binary classifier.
-
-        - 'equal': equal priors for the positive and negative class.
-        - 'empirical': priors estimated from class frequencies in the binary
-          labels.
-
-    scaling : float or None, default=2
-        Optional scaling factor applied to the projection vector in each binary
-        ShrinkageLDA model so that projected class means are separated by a
-        specified distance. If None, no additional scaling is applied.
-
-    inverse : {'inv', 'pinv'}, default='inv'
-        Method used to invert the covariance matrix in each binary model.
-
-        - 'inv': use ``numpy.linalg.inv``.
-        - 'pinv': use ``numpy.linalg.pinv`` (more stable for ill-conditioned
-          covariance matrices).
-
-    Attributes
-    ----------
-    classes_ : ndarray of shape (n_classes,)
-        Sorted unique class labels seen during fitting.
-
-    model_dict_ : dict
-        Dictionary mapping each class label to its corresponding fitted
-        :class:`ShrinkageLDA` binary classifier trained in a one-vs-all fashion.
-
-    Notes
-    -----
-    For each class :math:`c`, a binary classifier is trained using labels
-
-    .. math::
-
-        y_{bin} = \\mathbb{1}(y = c),
-
-    where the positive class corresponds to samples of class :math:`c` and the
-    negative class corresponds to all other samples.
-
-    The decision function returns a matrix of shape ``(n_samples, n_classes)``,
-    where each column contains the decision scores of the corresponding binary
-    classifier.
-
-    The predicted class is obtained as:
-
-    .. math::
-
-        \\hat{y} = \\arg\\max_c f_c(x),
-
-    where :math:`f_c(x)` is the decision score of the classifier for class
-    :math:`c`.
-
-    The probability estimates are computed by extracting the positive-class
-    probabilities from each binary classifier and normalizing them:
-
-    .. math::
-
-        \\tilde{p}_c(x) = \\frac{p_c(x)}{\\sum_k p_k(x) + \\epsilon},
-
-    where :math:`p_c(x)` is the OvA probability for class :math:`c` and
-    :math:`\\epsilon` is a small constant for numerical stability.
-
-    These normalized values provide relative confidence across classes but are
-    not guaranteed to be perfectly calibrated multi-class posterior probabilities.
-
-    """
-
     def __init__(
         self,
         gamma="lwf",
@@ -308,41 +344,6 @@ class ShrinkageLDA_OVA(BaseEstimator, ClassifierMixin):
         p = np.column_stack(p_list)
         p = p / (p.sum(axis=1, keepdims=True) + 1e-12)
         return p
-
-
-def openvibe_pseudo_inv(X):
-
-    X = 0.5 * (X + X.T)
-
-    eigvals, eigvecs = np.linalg.eigh(X)
-    tol = 1e-5 * eigvals[-1]
-    mod = eigvals.copy()
-    mask = mod >= tol
-    mod[mask] = 1.0 / mod[mask]
-    X_inv = (eigvecs * mod) @ eigvecs.T
-
-    return X_inv
-
-
-def openvibe_ledoit_wolf(X, S):
-
-    n_samples, n_features = X.shape
-
-    nu = np.trace(S) / n_features
-    F = nu * np.eye(n_features)
-
-    Y = X * X
-
-    phiMat = (Y.T @ Y) / n_samples - S * S
-
-    phi = phiMat.sum()
-
-    gamma = norm(S - F, ord="fro") ** 2
-    kappa = phi / gamma
-
-    shrinkage = np.clip(kappa / n_samples, 0.0, 1.0)
-
-    return shrinkage
 
 
 class OpenVibeLDA(BaseEstimator, ClassifierMixin):

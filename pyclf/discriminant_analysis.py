@@ -1,26 +1,14 @@
 import numpy as np
 from sklearn.base import BaseEstimator, TransformerMixin, ClassifierMixin
-from sklearn.utils.validation import check_is_fitted
+from sklearn.utils.validation import check_is_fitted, check_X_y, check_array
 from sklearn.covariance import LedoitWolf
 from scipy.special import expit
 from scipy.linalg import pinv, norm
 
 
-def subtract_classwise_mean(X, y):
-    Xc = X.copy()
-    for cl in np.unique(y):
-        idx = y == cl
-        Xc[idx] -= Xc[idx].mean(axis=0, keepdims=True)
-    return Xc
-
-
 def compute_priors(Nk, mode):
-    # priors = np.zeros(Nk.shape)
     n_classes = Nk.size
     n_samples = Nk.sum()
-    print(Nk.shape)
-    print(n_classes)
-    print(n_samples)
 
     if mode == "empirical":
         priors = Nk / n_samples
@@ -32,6 +20,34 @@ def compute_priors(Nk, mode):
     return priors
 
 
+def ledoit_wolf(X, assume_centered=False):
+
+    X = X.copy()
+
+    if assume_centered is False:
+        X = X - X.mean(axis=0)
+
+    n_samples, n_features = X.shape
+
+    S = X.T @ X / n_samples
+
+    nu = np.trace(S) / n_features
+    F = nu * np.eye(n_features)
+
+    Y = X * X
+
+    phiMat = (Y.T @ Y) / n_samples - S * S
+
+    phi = phiMat.sum()
+
+    gamma = norm(S - F, ord="fro") ** 2
+    kappa = phi / gamma
+
+    shrinkage = np.clip(kappa / n_samples, 0.0, 1.0)
+
+    return shrinkage
+
+
 class BinaryLinearDiscriminantAnalysis(BaseEstimator, ClassifierMixin):
     def __init__(
         self,
@@ -39,22 +55,15 @@ class BinaryLinearDiscriminantAnalysis(BaseEstimator, ClassifierMixin):
         priors="empirical",
         scaling=2,
         inverse="inv",
-        ddof=1,
     ):
         self.gamma = gamma
         self.priors = priors
         self.scaling = scaling
         self.inverse = inverse
-        self.ddof = ddof
-
-        if inverse == "inv":
-            self.inverse = np.linalg.inv
-        elif inverse == "pinv":
-            self.inverse = np.linalg.pinv
-        else:
-            raise RuntimeError("inverse should be either 'inv' or 'pinv'.")
 
     def fit(self, X, y=None):
+
+        X, y = check_X_y(X, y)
 
         n_samples, n_features = X.shape
 
@@ -75,7 +84,6 @@ class BinaryLinearDiscriminantAnalysis(BaseEstimator, ClassifierMixin):
 
         self.priors_ = compute_priors(self.Nk_, self.priors)
 
-        # Xw = subtract_classwise_mean(X=X, y=y)
         Xc = X.copy()
 
         # compute class-wise covariace
@@ -83,41 +91,41 @@ class BinaryLinearDiscriminantAnalysis(BaseEstimator, ClassifierMixin):
             idx = y == c
             Xc[idx, :] = Xc[idx, :] - self.mu_[idx_c, :]
 
-        print(X.mean(0))
-        print(Xc.mean(0))
-
-        exit()
-
-        Sigma = (Xw.T @ Xw) / (n_samples - self.ddof)
-
-        print()
+        Sw = (Xc.T @ Xc) / n_samples
 
         if self.gamma == "lwf":
-            lw = LedoitWolf(assume_centered=False).fit(Xw)
-            self.gamma_ = lw.shrinkage_
+            shrinkage = ledoit_wolf(
+                X=Xc,
+                assume_centered=False,
+            )
+            self.gamma_ = shrinkage
         else:
             self.gamma_ = float(self.gamma)
 
         if self.gamma_ < 0 or self.gamma_ > 1:
             raise RuntimeError("shrinkage parameter should be in [0, 1].")
 
-        n_samples, n_features = Xw.shape
-
-        Sigma = (Xw.T @ Xw) / (n_samples - 1)
-
-        nu = np.trace(Sigma) / n_features
+        nu = np.trace(Sw) / n_features
         T = nu * np.eye(n_features)
 
-        Cw = (1 - self.gamma_) * Sigma + self.gamma_ * T
-        Cw_inv = self.inverse(Cw)
+        Sw_shrunk = (1 - self.gamma_) * Sw + self.gamma_ * T
 
-        w = Cw_inv @ (mean[1] - mean[0])
+        if self.inverse == "inv":
+            self._inv = np.linalg.inv
+        elif self.inverse == "pinv":
+            self._inv = np.linalg.pinv
+        else:
+            raise RuntimeError("inverse should be either 'inv' or 'pinv'.")
+
+        Sw_shrunk_inv = self._inv(Sw_shrunk)
+
+        w = Sw_shrunk_inv @ (self.mu_[1] - self.mu_[0])
 
         if self.scaling is not None:
-            scaling_factor = self.scaling / (w.T @ mean[0] - w.T @ mean[1])
+            scaling_factor = self.scaling / (w.T @ self.mu_[0] - w.T @ self.mu_[1])
             w = np.squeeze(w * np.absolute(scaling_factor))
 
-        b = -0.5 * (w.T @ mean[0] + w.T @ mean[1]) + np.log(
+        b = -0.5 * (w.T @ self.mu_[0] + w.T @ self.mu_[1]) + np.log(
             self.priors_[1] / self.priors_[0]
         )
 
@@ -127,7 +135,8 @@ class BinaryLinearDiscriminantAnalysis(BaseEstimator, ClassifierMixin):
         return self
 
     def decision_function(self, X):
-        check_is_fitted(self, ["classes_", "gamma_", "w_", "b_", "priors_"])
+        check_is_fitted(self, ["classes_", "gamma_", "w_", "b_"])
+        X = check_array(X)
         return X @ self.w_ + self.b_
 
     def predict_proba(self, X):
@@ -136,11 +145,17 @@ class BinaryLinearDiscriminantAnalysis(BaseEstimator, ClassifierMixin):
         p0 = 1 - p1
         return np.column_stack([p0, p1])
 
+    def predict_log_proba(self, X):
+        proba = self.predict_proba(X)
+        return np.log(proba)
+
     def predict(self, X):
         d = self.decision_function(X)
         preds = np.where(d >= 0, self.classes_[1], self.classes_[0])
-
         return preds
+
+    def score(self, X, y):
+        return accuracy_score(y, self.predict(X))
 
 
 class ShrinkageLDA_OVA(BaseEstimator, ClassifierMixin):

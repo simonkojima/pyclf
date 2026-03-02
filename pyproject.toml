@@ -23,10 +23,10 @@ dependencies = [
 [project.optional-dependencies]
 docs = [
   "sphinx",
-  "sphinx-rtd-theme",
+  "pydata-sphinx-theme",
+  "sphinx-multiversion",
   "sphinx-gallery",
   "numpydoc",
-  "myst-parser"
 ]
 
 [tool.setuptools.dynamic]

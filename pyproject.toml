@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyclf-bci"
+description = "An implementation of various classifiers for bci purpose."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+dynamic = ["version"]
+
+authors = [
+    { name = "Simon Kojima" },
+]
+
+dependencies = [
+    "numpy>=1.23",
+    "scipy>=1.9",
+    "scikit-learn>=1.2",
+]
+
+[project.optional-dependencies]
+docs = [
+  "sphinx",
+  "pydata-sphinx-theme",
+  "sphinx-multiversion",
+  "sphinx-gallery",
+  "numpydoc",
+]
+
+[tool.setuptools.dynamic]
+version = { attr = "pyclf.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pyclf*"]

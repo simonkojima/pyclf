@@ -10,7 +10,7 @@ def plot_2d_scatter(X_train, y_train, X_test, y_test, title="2D Multiclass Data"
 
     for k in classes:
         # train
-        idx_tr = y_test == k
+        idx_tr = y_train == k
         plt.scatter(
             X_train[idx_tr, 0],
             X_train[idx_tr, 1],

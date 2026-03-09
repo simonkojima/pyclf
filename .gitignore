@@ -195,12 +195,12 @@ cython_debug/
 
 # docs
 docs/build/
+docs/source
 !docs/source/_static/
 !docs/source/conf.py
 !docs/source/documentation.rst
 !docs/source/install.rst
 !docs/source/index.rst
-docs/source
 
 
 # misc
